@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "Credit Card Payoff Planner",
+    "slug": "credit-card-payoff-planner",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/app-logo.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FFFAEF"
+    },
+    "ios": {
+      "bundleIdentifier": "com.sawantaryan.creditcardpayoffplanner",
+      "supportsTablet": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.sawantaryan.creditcardpayoffplanner",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/app-logo.png",
+        "backgroundColor": "#FFFAEF"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/app-logo.png"
+    },
+    "plugins": [
+      "@react-native-community/datetimepicker"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "b6349e28-b317-4ca9-aa58-9258077a81ec"
+      }
+    },
+    "owner": "sawantaryan"
+  }
+}
