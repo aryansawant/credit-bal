@@ -272,7 +272,7 @@ Deno.serve(async (req) => {
       const response = await plaidRequest<{ link_token: string; expiration: string }>(
         "/link/token/create",
         {
-          client_name: "Debt Cal",
+          client_name: "Credit Disk",
           country_codes: ["US"],
           language: "en",
           products: ["transactions"],

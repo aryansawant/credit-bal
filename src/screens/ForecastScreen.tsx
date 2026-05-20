@@ -6,7 +6,6 @@ import {
   premiumAccent,
   radii,
   spacing,
-  typography,
 } from "../styles/theme";
 import type { CreditCard, PaycheckPlan, PayoffMode, PayoffResult } from "../types";
 import { formatDateLabel } from "../utils/dateHelpers";
@@ -32,10 +31,30 @@ function resultForMode(
   return mode === "planned" ? plannedResult : actualResult;
 }
 
-function payoffDateCopy(result: PayoffResult): string {
-  return result.estimatedPayoffDate
-    ? formatDateLabel(result.estimatedPayoffDate)
+function payoffMetricValue(result: PayoffResult): string {
+  if (result.estimatedPayoffDate) {
+    return formatDateLabel(result.estimatedPayoffDate);
+  }
+
+  return result.remainingBalance > 0
+    ? `${formatCurrencyWithCents(result.remainingBalance)} short`
     : "Not available";
+}
+
+function payoffMetricHelper(result: PayoffResult): string {
+  return result.estimatedPayoffDate
+    ? "Estimated debt-free date"
+    : "More planned payment needed";
+}
+
+function forecastWarning(result: PayoffResult): string | undefined {
+  if (result.estimatedPayoffDate || result.remainingBalance <= 0) {
+    return result.warning;
+  }
+
+  return `Add about ${formatCurrencyWithCents(
+    result.remainingBalance
+  )} more to a future paycheck to see a payoff date.`;
 }
 
 export function ForecastScreen({
@@ -49,16 +68,10 @@ export function ForecastScreen({
   const [mode, setMode] = useState<PayoffMode>("planned");
   const accent = premiumAccent;
   const selectedResult = resultForMode(mode, plannedResult, actualResult);
+  const selectedWarning = forecastWarning(selectedResult);
 
   return (
     <ScrollView contentContainerStyle={styles.content}>
-      <View style={styles.header}>
-        <View style={styles.headerText}>
-          <Text style={[styles.eyebrow, { color: accent.color }]}>Forecast</Text>
-          <Text style={styles.title}>Payoff estimate</Text>
-        </View>
-      </View>
-
       <View style={styles.segmented}>
         <Pressable
           accessibilityRole="button"
@@ -114,8 +127,8 @@ export function ForecastScreen({
             ? "Uses planned card payments from entered paychecks and a balance-weighted portfolio APR."
             : "Uses confirmed paid and partial check-ins only with a balance-weighted portfolio APR."}
         </Text>
-        {selectedResult.warning ? (
-          <Text style={styles.warning}>{selectedResult.warning}</Text>
+        {selectedWarning ? (
+          <Text style={styles.warning}>{selectedWarning}</Text>
         ) : null}
       </SummaryCard>
 
@@ -123,9 +136,9 @@ export function ForecastScreen({
         <MetricCard
           accentBackgroundColor={accent.soft}
           accentColor={accent.color}
-          helper="Estimated debt-free date"
+          helper={payoffMetricHelper(selectedResult)}
           label="Payoff date"
-          value={payoffDateCopy(selectedResult)}
+          value={payoffMetricValue(selectedResult)}
         />
         <MetricCard
           helper="Months in simulation"
@@ -201,28 +214,6 @@ const styles = StyleSheet.create({
     gap: spacing.lg,
     padding: spacing.lg,
     paddingBottom: spacing.xxl,
-  },
-  header: {
-    alignItems: "flex-start",
-    flexDirection: "row",
-    gap: spacing.md,
-    justifyContent: "space-between",
-    paddingTop: spacing.md,
-  },
-  headerText: {
-    flex: 1,
-    gap: spacing.xs,
-  },
-  eyebrow: {
-    color: colors.green,
-    fontSize: 13,
-    fontWeight: "800",
-    textTransform: "uppercase",
-  },
-  title: {
-    color: colors.text,
-    fontSize: typography.title,
-    fontWeight: "900",
   },
   segmented: {
     backgroundColor: colors.surfaceMuted,

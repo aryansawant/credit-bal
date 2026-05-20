@@ -4,7 +4,7 @@ export const colors = {
   surfaceMuted: "#E9EEF8",
   text: "#111827",
   textMuted: "#667085",
-  border: "#DDD6C7",
+  border: "#004AAD",
   green: "#004AAD",
   greenSoft: "#E7F0FF",
   blue: "#004AAD",

@@ -50,7 +50,9 @@ export function MetricCard({
 
 const styles = StyleSheet.create({
   card: {
+    borderColor: colors.border,
     borderRadius: radii.md,
+    borderWidth: StyleSheet.hairlineWidth,
     flex: 1,
     minHeight: 112,
     padding: spacing.lg,

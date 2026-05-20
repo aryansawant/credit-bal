@@ -25,10 +25,17 @@ type AuthResponse = {
   refresh_token?: string;
   expires_at?: number;
   expires_in?: number;
+  id?: string;
+  email?: string;
+  message?: string;
+  session?: AuthResponse | null;
   user?: AuthUser;
   error?: string;
   error_description?: string;
   msg?: string;
+  weak_password?: {
+    message?: string;
+  };
 };
 
 type SnapshotRow = {
@@ -68,28 +75,68 @@ function authHeaders(accessToken?: string) {
   };
 }
 
-function sessionFromAuthResponse(payload: AuthResponse): CloudSession {
-  if (payload.user?.id && (!payload.access_token || !payload.refresh_token)) {
+function directUserFromPayload(payload: AuthResponse): AuthUser | null {
+  if (payload.user?.id) {
+    return payload.user;
+  }
+
+  if (payload.id) {
+    return {
+      id: payload.id,
+      email: payload.email,
+    };
+  }
+
+  return null;
+}
+
+function authErrorMessage(payload: AuthResponse): string | null {
+  return (
+    payload.error_description ??
+    payload.weak_password?.message ??
+    payload.message ??
+    payload.error ??
+    payload.msg ??
+    null
+  );
+}
+
+function fallbackAuthMessage(mode: "signin" | "signup"): string {
+  return mode === "signup"
+    ? "Could not create account. Check that email signups are enabled in Supabase Auth."
+    : "Sign in failed. Check your email, password, and email confirmation.";
+}
+
+function sessionFromAuthResponse(
+  payload: AuthResponse,
+  mode: "signin" | "signup"
+): CloudSession {
+  const sessionPayload = payload.session ?? payload;
+  const user =
+    directUserFromPayload(sessionPayload) ?? directUserFromPayload(payload);
+
+  if (
+    sessionPayload.access_token &&
+    sessionPayload.refresh_token &&
+    user?.id
+  ) {
+    return {
+      accessToken: sessionPayload.access_token,
+      expiresAt:
+        sessionPayload.expires_at ??
+        (sessionPayload.expires_in
+          ? Math.floor(Date.now() / 1000) + sessionPayload.expires_in
+          : undefined),
+      refreshToken: sessionPayload.refresh_token,
+      user,
+    };
+  }
+
+  if (mode === "signup" && user?.id) {
     throw new Error("Account created. Check your email, then sign in.");
   }
 
-  if (!payload.access_token || !payload.refresh_token || !payload.user?.id) {
-    const message =
-      payload.error_description ?? payload.error ?? payload.msg ?? "Auth failed.";
-
-    throw new Error(message);
-  }
-
-  return {
-    accessToken: payload.access_token,
-    expiresAt:
-      payload.expires_at ??
-      (payload.expires_in
-        ? Math.floor(Date.now() / 1000) + payload.expires_in
-        : undefined),
-    refreshToken: payload.refresh_token,
-    user: payload.user,
-  };
+  throw new Error(authErrorMessage(payload) ?? fallbackAuthMessage(mode));
 }
 
 async function saveSession(session: CloudSession): Promise<void> {
@@ -97,6 +144,7 @@ async function saveSession(session: CloudSession): Promise<void> {
 }
 
 async function requestAuth(
+  mode: "signin" | "signup",
   path: string,
   body: Record<string, unknown>
 ): Promise<CloudSession> {
@@ -110,12 +158,10 @@ async function requestAuth(
   const payload = (await response.json().catch(() => ({}))) as AuthResponse;
 
   if (!response.ok) {
-    throw new Error(
-      payload.error_description ?? payload.error ?? payload.msg ?? "Auth failed."
-    );
+    throw new Error(authErrorMessage(payload) ?? fallbackAuthMessage(mode));
   }
 
-  const session = sessionFromAuthResponse(payload);
+  const session = sessionFromAuthResponse(payload, mode);
   await saveSession(session);
   return session;
 }
@@ -124,14 +170,14 @@ export async function signUpWithEmail(
   email: string,
   password: string
 ): Promise<CloudSession> {
-  return requestAuth("/signup", { email, password });
+  return requestAuth("signup", "/signup", { email, password });
 }
 
 export async function signInWithEmail(
   email: string,
   password: string
 ): Promise<CloudSession> {
-  return requestAuth("/token?grant_type=password", { email, password });
+  return requestAuth("signin", "/token?grant_type=password", { email, password });
 }
 
 export async function getStoredCloudSession(): Promise<CloudSession | null> {
@@ -157,7 +203,7 @@ export async function getStoredCloudSession(): Promise<CloudSession | null> {
 export async function refreshCloudSession(
   session: CloudSession
 ): Promise<CloudSession> {
-  return requestAuth("/token?grant_type=refresh_token", {
+  return requestAuth("signin", "/token?grant_type=refresh_token", {
     refresh_token: session.refreshToken,
   });
 }

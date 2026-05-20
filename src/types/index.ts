@@ -68,6 +68,7 @@ export type PayoffMonth = {
 export type PayoffResult = {
   months: number;
   estimatedPayoffDate: string | null;
+  remainingBalance: number;
   totalInterest: number;
   totalPaid: number;
   schedule: PayoffMonth[];

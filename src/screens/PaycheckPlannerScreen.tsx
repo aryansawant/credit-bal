@@ -1,8 +1,15 @@
 import { useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { AppButton, EmptyState, PaycheckCard } from "../components";
-import { colors, spacing, typography } from "../styles/theme";
+import { colors, spacing } from "../styles/theme";
 import type { PaycheckPlan } from "../types";
+import { formatMonthLabel, parseISODate } from "../utils/dateHelpers";
+
+type PaycheckMonthGroup = {
+  key: string;
+  label: string;
+  paychecks: PaycheckPlan[];
+};
 
 type PaycheckPlannerScreenProps = {
   paychecks: PaycheckPlan[];
@@ -11,6 +18,32 @@ type PaycheckPlannerScreenProps = {
   onDeletePaycheck: (paycheck: PaycheckPlan) => void;
   onEditPaycheck: (paycheck: PaycheckPlan) => void;
 };
+
+function monthLabelForPaycheck(paycheck: PaycheckPlan): string {
+  const date = parseISODate(paycheck.paycheckDate);
+
+  return date ? formatMonthLabel(date) : "No date";
+}
+
+function groupPaychecksByMonth(paychecks: PaycheckPlan[]): PaycheckMonthGroup[] {
+  return paychecks.reduce<PaycheckMonthGroup[]>((groups, paycheck) => {
+    const key = paycheck.paycheckDate.slice(0, 7) || "no-date";
+    const existingGroup = groups.find((group) => group.key === key);
+
+    if (existingGroup) {
+      existingGroup.paychecks.push(paycheck);
+      return groups;
+    }
+
+    groups.push({
+      key,
+      label: monthLabelForPaycheck(paycheck),
+      paychecks: [paycheck],
+    });
+
+    return groups;
+  }, []);
+}
 
 export function PaycheckPlannerScreen({
   paychecks,
@@ -23,6 +56,7 @@ export function PaycheckPlannerScreen({
   const sortedPaychecks = [...paychecks].sort((a, b) =>
     a.paycheckDate.localeCompare(b.paycheckDate)
   );
+  const paycheckGroups = groupPaychecksByMonth(sortedPaychecks);
 
   return (
     <ScrollView
@@ -31,26 +65,26 @@ export function PaycheckPlannerScreen({
       scrollEnabled={scrollEnabled}
       scrollEventThrottle={16}
     >
-      <View style={styles.header}>
-        <View style={styles.headerText}>
-          <Text style={styles.eyebrow}>Future paychecks</Text>
-          <Text style={styles.title}>Payment plans</Text>
-        </View>
-      </View>
-
       <AppButton label="Add paycheck" onPress={onAddPaycheck} />
 
       {sortedPaychecks.length > 0 ? (
-        <View style={styles.list}>
-          {sortedPaychecks.map((paycheck) => (
-            <PaycheckCard
-              key={paycheck.id}
-              onCheckIn={() => onCheckIn(paycheck)}
-              onDelete={() => onDeletePaycheck(paycheck)}
-              onEdit={() => onEditPaycheck(paycheck)}
-              onSwipeActiveChange={(active) => setScrollEnabled(!active)}
-              paycheck={paycheck}
-            />
+        <View style={styles.monthList}>
+          {paycheckGroups.map((group) => (
+            <View key={group.key} style={styles.monthGroup}>
+              <Text style={styles.monthHeader}>{group.label}</Text>
+              <View style={styles.list}>
+                {group.paychecks.map((paycheck) => (
+                  <PaycheckCard
+                    key={paycheck.id}
+                    onCheckIn={() => onCheckIn(paycheck)}
+                    onDelete={() => onDeletePaycheck(paycheck)}
+                    onEdit={() => onEditPaycheck(paycheck)}
+                    onSwipeActiveChange={(active) => setScrollEnabled(!active)}
+                    paycheck={paycheck}
+                  />
+                ))}
+              </View>
+            </View>
           ))}
         </View>
       ) : (
@@ -69,27 +103,17 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
     paddingBottom: spacing.xxl,
   },
-  header: {
-    alignItems: "flex-start",
-    flexDirection: "row",
-    gap: spacing.md,
-    justifyContent: "space-between",
-    paddingTop: spacing.md,
+  monthList: {
+    gap: spacing.xl,
   },
-  headerText: {
-    flex: 1,
-    gap: spacing.xs,
+  monthGroup: {
+    gap: spacing.sm,
   },
-  eyebrow: {
+  monthHeader: {
     color: colors.green,
     fontSize: 13,
-    fontWeight: "800",
-    textTransform: "uppercase",
-  },
-  title: {
-    color: colors.text,
-    fontSize: typography.title,
     fontWeight: "900",
+    textTransform: "uppercase",
   },
   list: {
     gap: spacing.md,

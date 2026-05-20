@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import {
-  AppButton,
   EmptyState,
   MetricCard,
   ProgressBar,
   SummaryCard,
 } from "../components";
-import { colors, spacing, typography } from "../styles/theme";
+import { colors, spacing } from "../styles/theme";
 import type { CreditCard, PaycheckPlan, PayoffResult } from "../types";
 import { formatDateLabel, getTodayISO } from "../utils/dateHelpers";
 import {
@@ -28,7 +27,6 @@ type HomeScreenProps = {
   startingBalance: number;
   plannedResult: PayoffResult;
   actualResult: PayoffResult;
-  onOpenCards: () => void;
 };
 
 function getNextPaycheck(paychecks: PaycheckPlan[]): PaycheckPlan | undefined {
@@ -53,7 +51,6 @@ export function HomeScreen({
   startingBalance,
   plannedResult,
   actualResult,
-  onOpenCards,
 }: HomeScreenProps) {
   const [selectedBalanceId, setSelectedBalanceId] = useState<string>("all");
   const nextPaycheck = getNextPaycheck(paychecks);
@@ -103,16 +100,6 @@ export function HomeScreen({
 
   return (
     <ScrollView contentContainerStyle={styles.content}>
-      <View style={styles.header}>
-        <View style={styles.headerText}>
-          <Text style={styles.eyebrow}>
-            {cards.length} card{cards.length === 1 ? "" : "s"}
-          </Text>
-          <Text style={styles.title}>Payoff dashboard</Text>
-        </View>
-        <AppButton label="Cards" onPress={onOpenCards} variant="secondary" />
-      </View>
-
       <SummaryCard
         footer={
           <View style={styles.progressFooter}>
@@ -257,28 +244,6 @@ const styles = StyleSheet.create({
     gap: spacing.lg,
     padding: spacing.lg,
     paddingBottom: spacing.xxl,
-  },
-  header: {
-    alignItems: "flex-start",
-    flexDirection: "row",
-    gap: spacing.md,
-    justifyContent: "space-between",
-    paddingTop: spacing.md,
-  },
-  headerText: {
-    flex: 1,
-    gap: spacing.xs,
-  },
-  eyebrow: {
-    color: colors.green,
-    fontSize: 13,
-    fontWeight: "800",
-    textTransform: "uppercase",
-  },
-  title: {
-    color: colors.text,
-    fontSize: typography.title,
-    fontWeight: "900",
   },
   balance: {
     color: colors.text,

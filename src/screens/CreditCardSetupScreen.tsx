@@ -111,7 +111,7 @@ export function CreditCardSetupScreen({
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.header}>
-          <Text style={styles.eyebrow}>Credit Card Payoff Planner</Text>
+          <Text style={styles.eyebrow}>Credit Disk</Text>
           <Text style={styles.title}>
             {initialCard ? "Edit your card" : "Set up your card"}
           </Text>

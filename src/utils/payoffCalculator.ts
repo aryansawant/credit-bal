@@ -154,6 +154,7 @@ export function calculatePayoff(
     return {
       months: 0,
       estimatedPayoffDate: toISODate(startDate),
+      remainingBalance: 0,
       totalInterest: 0,
       totalPaid: 0,
       schedule: [],
@@ -165,6 +166,7 @@ export function calculatePayoff(
     return {
       months: 0,
       estimatedPayoffDate: null,
+      remainingBalance: card.balance,
       totalInterest: 0,
       totalPaid: 0,
       schedule: [],
@@ -179,6 +181,7 @@ export function calculatePayoff(
     return {
       months: 0,
       estimatedPayoffDate: null,
+      remainingBalance: card.balance,
       totalInterest: 0,
       totalPaid: 0,
       schedule: [],
@@ -245,6 +248,7 @@ export function calculatePayoff(
       return {
         months: monthIndex + 1,
         estimatedPayoffDate: payoffDate,
+        remainingBalance: 0,
         totalInterest,
         totalPaid,
         schedule,
@@ -256,6 +260,7 @@ export function calculatePayoff(
   return {
     months: schedule.length,
     estimatedPayoffDate: null,
+    remainingBalance: balance,
     totalInterest,
     totalPaid,
     schedule,

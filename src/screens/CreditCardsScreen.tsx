@@ -8,12 +8,8 @@ import {
   UIManager,
   View,
 } from "react-native";
-import {
-  AppButton,
-  CreditCardCard,
-  EmptyState,
-} from "../components";
-import { colors, spacing, typography } from "../styles/theme";
+import { AppButton, CreditCardCard, EmptyState } from "../components";
+import { colors, spacing } from "../styles/theme";
 import type { CreditCard } from "../types";
 import { formatCurrencyWithCents } from "../utils/formatters";
 
@@ -55,9 +51,7 @@ export function CreditCardsScreen({
   }, [cards, selectedCardId]);
 
   function selectCard(cardId: string) {
-    if (cardId === selectedCardId) {
-      return;
-    }
+    const nextSelectedCardId = cardId === selectedCardId ? null : cardId;
 
     LayoutAnimation.configureNext(
       {
@@ -78,7 +72,11 @@ export function CreditCardsScreen({
         },
       },
       () => {
-        const y = cardOffsets.current[cardId];
+        if (!nextSelectedCardId) {
+          return;
+        }
+
+        const y = cardOffsets.current[nextSelectedCardId];
 
         if (typeof y === "number") {
           scrollViewRef.current?.scrollTo({
@@ -88,7 +86,7 @@ export function CreditCardsScreen({
         }
       }
     );
-    setSelectedCardId(cardId);
+    setSelectedCardId(nextSelectedCardId);
   }
 
   return (
@@ -97,13 +95,6 @@ export function CreditCardsScreen({
       ref={scrollViewRef}
       style={styles.screen}
     >
-      <View style={styles.header}>
-        <View style={styles.headerText}>
-          <Text style={styles.eyebrow}>Credit cards</Text>
-          <Text style={styles.title}>Card balances</Text>
-        </View>
-      </View>
-
       {cards.length > 0 ? (
         <View style={styles.walletStack}>
           {cards.map((card, index) => {
@@ -179,8 +170,6 @@ export function CreditCardsScreen({
           title="No cards yet"
         />
       )}
-
-      <AppButton label="Add credit card" onPress={onAddCard} />
     </ScrollView>
   );
 }
@@ -194,28 +183,6 @@ const styles = StyleSheet.create({
   },
   screen: {
     backgroundColor: colors.background,
-  },
-  header: {
-    alignItems: "flex-start",
-    flexDirection: "row",
-    gap: spacing.md,
-    justifyContent: "space-between",
-    paddingTop: spacing.md,
-  },
-  headerText: {
-    flex: 1,
-    gap: spacing.xs,
-  },
-  eyebrow: {
-    color: colors.green,
-    fontSize: 13,
-    fontWeight: "800",
-    textTransform: "uppercase",
-  },
-  title: {
-    color: colors.text,
-    fontSize: typography.title,
-    fontWeight: "900",
   },
   walletStack: {
     paddingBottom: spacing.md,

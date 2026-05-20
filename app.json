@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Credit Card Payoff Planner",
+    "name": "Credit Disk",
     "slug": "credit-card-payoff-planner",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -8,9 +8,9 @@
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/app-logo.png",
       "resizeMode": "contain",
-      "backgroundColor": "#FFFAEF"
+      "backgroundColor": "#004aad"
     },
     "ios": {
       "bundleIdentifier": "com.sawantaryan.creditcardpayoffplanner",

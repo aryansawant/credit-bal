@@ -7,6 +7,7 @@ import { formatDateLabel } from "../utils/dateHelpers";
 import { formatCurrencyWithCents } from "../utils/formatters";
 
 type CheckInMode = "planned" | "different" | "skipped";
+type PaymentTarget = "all" | string;
 
 type PaymentCheckInScreenProps = {
   cards: CreditCard[];
@@ -39,6 +40,39 @@ function numberFromInput(value: string): number {
   return Number(value.replace(/,/g, "").trim());
 }
 
+function actualPaymentTotal(payments: CardPaymentAllocation[]): number {
+  return payments.reduce(
+    (total, payment) => total + (payment.actualAmount ?? 0),
+    0
+  );
+}
+
+function getInitialPaymentTarget(
+  cards: CreditCard[],
+  paycheck: PaycheckPlan
+): PaymentTarget {
+  const cardIds = new Set(cards.map((card) => card.id));
+  const actualPayments =
+    paycheck.cardPayments?.filter(
+      (payment) => cardIds.has(payment.cardId) && (payment.actualAmount ?? 0) > 0
+    ) ?? [];
+
+  if (actualPayments.length === 1) {
+    return actualPayments[0].cardId;
+  }
+
+  const plannedPayments =
+    paycheck.cardPayments?.filter(
+      (payment) => cardIds.has(payment.cardId) && payment.plannedAmount > 0
+    ) ?? [];
+
+  if (plannedPayments.length === 1) {
+    return plannedPayments[0].cardId;
+  }
+
+  return cards.length === 1 ? cards[0].id : "all";
+}
+
 export function PaymentCheckInScreen({
   cards,
   paycheck,
@@ -46,6 +80,9 @@ export function PaymentCheckInScreen({
   onSave,
 }: PaymentCheckInScreenProps) {
   const [mode, setMode] = useState<CheckInMode>(getInitialMode(paycheck));
+  const [paymentTarget, setPaymentTarget] = useState<PaymentTarget>(() =>
+    getInitialPaymentTarget(cards, paycheck)
+  );
   const [actualByCard, setActualByCard] = useState<Record<string, string>>(
     () =>
       cards.reduce<Record<string, string>>((acc, card, index) => {
@@ -67,14 +104,68 @@ export function PaymentCheckInScreen({
       }, {})
   );
   const [error, setError] = useState<string | undefined>();
+  const selectedTargetCard =
+    paymentTarget === "all"
+      ? null
+      : cards.find((card) => card.id === paymentTarget) ?? null;
+  const plannedPayments = useMemo<CardPaymentAllocation[]>(() => {
+    const storedPayments = paycheck.cardPayments ?? [];
 
-  const previewActual = useMemo(() => {
-    if (mode === "planned") {
-      return paycheck.plannedCardPayment;
+    return cards.map((card, index) => {
+      const existing = storedPayments.find(
+        (payment) => payment.cardId === card.id
+      );
+
+      if (existing) {
+        return existing;
+      }
+
+      return {
+        cardId: card.id,
+        plannedAmount:
+          storedPayments.length === 0 && index === 0
+            ? paycheck.plannedCardPayment
+            : 0,
+      };
+    });
+  }, [cards, paycheck.cardPayments, paycheck.plannedCardPayment]);
+  const plannedTotal = useMemo(
+    () =>
+      plannedPayments.reduce(
+        (total, payment) => total + payment.plannedAmount,
+        0
+      ),
+    [plannedPayments]
+  );
+  const selectedPlannedTotal = useMemo(() => {
+    if (paymentTarget === "all") {
+      return plannedTotal;
     }
 
+    return (
+      plannedPayments.find((payment) => payment.cardId === paymentTarget)
+        ?.plannedAmount ?? 0
+    );
+  }, [paymentTarget, plannedPayments, plannedTotal]);
+  const selectedPlanLabel =
+    paymentTarget === "all"
+      ? "Planned card payment"
+      : `Planned for ${selectedTargetCard?.name ?? "selected card"}`;
+  const differenceLabel =
+    paymentTarget === "all" ? "Actual vs planned" : "Actual vs selected plan";
+
+  const previewActual = useMemo(() => {
     if (mode === "skipped") {
       return 0;
+    }
+
+    if (mode === "planned") {
+      return selectedPlannedTotal;
+    }
+
+    if (paymentTarget !== "all") {
+      const parsed = numberFromInput(actualByCard[paymentTarget] ?? "0");
+      return Number.isFinite(parsed) ? parsed : undefined;
     }
 
     const total = cards.reduce((sum, card) => {
@@ -82,33 +173,33 @@ export function PaymentCheckInScreen({
       return Number.isFinite(parsed) ? sum + parsed : sum;
     }, 0);
     return Number.isFinite(total) ? total : undefined;
-  }, [actualByCard, cards, mode, paycheck.plannedCardPayment]);
-
-  function plannedCardPayments(): CardPaymentAllocation[] {
-    if (paycheck.cardPayments?.length) {
-      return paycheck.cardPayments;
-    }
-
-    return cards.map((card, index) => ({
-      cardId: card.id,
-      plannedAmount: index === 0 ? paycheck.plannedCardPayment : 0,
-    }));
-  }
+  }, [actualByCard, cards, mode, paymentTarget, selectedPlannedTotal]);
 
   const difference =
     typeof previewActual === "number"
-      ? previewActual - paycheck.plannedCardPayment
+      ? previewActual - selectedPlannedTotal
       : undefined;
 
   function handleSave() {
     if (mode === "planned") {
-      const cardPayments = plannedCardPayments().map((payment) => ({
+      const cardPayments = plannedPayments.map((payment) => ({
         ...payment,
-        actualAmount: payment.plannedAmount,
+        actualAmount:
+          paymentTarget === "all"
+            ? payment.plannedAmount
+            : payment.cardId === paymentTarget
+              ? selectedPlannedTotal
+              : payment.actualAmount ?? 0,
       }));
+      const savedActualTotal = actualPaymentTotal(cardPayments);
       onSave({
-        status: "paid",
-        actualCardPayment: paycheck.plannedCardPayment,
+        status:
+          savedActualTotal === 0
+            ? "skipped"
+            : savedActualTotal >= plannedTotal
+              ? "paid"
+              : "partial",
+        actualCardPayment: savedActualTotal,
         cardPayments,
       });
       return;
@@ -118,7 +209,7 @@ export function PaymentCheckInScreen({
       onSave({
         status: "skipped",
         actualCardPayment: 0,
-        cardPayments: plannedCardPayments().map((payment) => ({
+        cardPayments: plannedPayments.map((payment) => ({
           ...payment,
           actualAmount: 0,
         })),
@@ -126,17 +217,19 @@ export function PaymentCheckInScreen({
       return;
     }
 
-    const cardPayments = plannedCardPayments().map((payment) => {
-      const parsedActual = numberFromInput(actualByCard[payment.cardId] ?? "0");
+    const cardPayments = plannedPayments.map((payment) => {
+      const parsedActual =
+        paymentTarget === "all"
+          ? numberFromInput(actualByCard[payment.cardId] ?? "0")
+          : payment.cardId === paymentTarget
+            ? numberFromInput(actualByCard[paymentTarget] ?? "0")
+            : payment.actualAmount ?? 0;
       return {
         ...payment,
         actualAmount: Number.isFinite(parsedActual) ? parsedActual : Number.NaN,
       };
     });
-    const parsedActual = cardPayments.reduce(
-      (total, payment) => total + payment.actualAmount!,
-      0
-    );
+    const parsedActual = actualPaymentTotal(cardPayments);
 
     if (
       cardPayments.some(
@@ -153,7 +246,7 @@ export function PaymentCheckInScreen({
       status:
         parsedActual === 0
           ? "skipped"
-          : parsedActual >= paycheck.plannedCardPayment
+          : parsedActual >= plannedTotal
             ? "paid"
             : "partial",
       actualCardPayment: parsedActual,
@@ -167,8 +260,7 @@ export function PaymentCheckInScreen({
         <Text style={styles.eyebrow}>Payment check-in</Text>
         <Text style={styles.title}>{formatDateLabel(paycheck.paycheckDate)}</Text>
         <Text style={styles.subtitle}>
-          Planned card payment:{" "}
-          {formatCurrencyWithCents(paycheck.plannedCardPayment)}
+          {selectedPlanLabel}: {formatCurrencyWithCents(selectedPlannedTotal)}
         </Text>
       </View>
 
@@ -192,17 +284,44 @@ export function PaymentCheckInScreen({
         </View>
       </SummaryCard>
 
+      {mode !== "skipped" ? (
+        <SummaryCard title="Paid toward">
+          <View style={styles.optionGroup}>
+            <AppButton
+              label="All cards"
+              onPress={() => setPaymentTarget("all")}
+              variant={paymentTarget === "all" ? "primary" : "secondary"}
+            />
+            {cards.map((card) => (
+              <AppButton
+                key={card.id}
+                label={card.name}
+                onPress={() => setPaymentTarget(card.id)}
+                variant={paymentTarget === card.id ? "primary" : "secondary"}
+              />
+            ))}
+          </View>
+        </SummaryCard>
+      ) : null}
+
       {mode === "different" ? (
         <SummaryCard>
           <View style={styles.actualInputs}>
-            {plannedCardPayments().map((payment) => {
+            {(paymentTarget === "all"
+              ? plannedPayments
+              : plannedPayments.filter((payment) => payment.cardId === paymentTarget)
+            ).map((payment) => {
               const card = cards.find((item) => item.id === payment.cardId);
 
               return (
                 <MoneyInput
                   error={error}
                   key={payment.cardId}
-                  label={card?.name ?? "Card"}
+                  label={
+                    paymentTarget === "all"
+                      ? card?.name ?? "Card"
+                      : selectedTargetCard?.name ?? card?.name ?? "Card"
+                  }
                   onChangeText={(value) =>
                     setActualByCard((current) => ({
                       ...current,
@@ -220,7 +339,14 @@ export function PaymentCheckInScreen({
 
       <SummaryCard title="Difference">
         <View style={styles.differenceCard}>
-          <Text style={styles.differenceLabel}>Actual vs planned</Text>
+          <Text style={styles.differenceLabel}>Check-in total</Text>
+          <Text style={styles.totalValue}>
+            {typeof previewActual === "number"
+              ? formatCurrencyWithCents(previewActual)
+              : "Enter amount"}
+          </Text>
+          <View style={styles.differenceDivider} />
+          <Text style={styles.differenceLabel}>{differenceLabel}</Text>
           <Text
             style={[
               styles.differenceValue,
@@ -283,6 +409,16 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "800",
     marginBottom: spacing.xs,
+  },
+  totalValue: {
+    color: colors.text,
+    fontSize: 30,
+    fontWeight: "900",
+  },
+  differenceDivider: {
+    backgroundColor: colors.border,
+    height: StyleSheet.hairlineWidth,
+    marginVertical: spacing.md,
   },
   differenceValue: {
     fontSize: 30,

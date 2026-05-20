@@ -1,7 +1,8 @@
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
+  Animated,
+  Image,
   Modal,
   Pressable,
   SafeAreaView,
@@ -20,12 +21,6 @@ import {
   savePaychecks,
   type StoredAppData,
 } from "./src/storage/appStorage";
-import {
-  connectSandboxBank,
-  isBankSyncConfigured,
-  syncBankBalances,
-  type BankAccountBalance,
-} from "./src/services/bankSync";
 import {
   getValidCloudSession,
   loadCloudSnapshot,
@@ -56,6 +51,11 @@ import {
   getConfirmedActualPaid,
 } from "./src/utils/payoffCalculator";
 import {
+  getMonthKey,
+  parseISODate,
+  startOfMonth,
+} from "./src/utils/dateHelpers";
+import {
   AccountScreen,
   AddEditPaycheckScreen,
   CreditCardSetupScreen,
@@ -66,6 +66,10 @@ import {
   PaycheckPlannerScreen,
   PaymentCheckInScreen,
 } from "./src/screens";
+
+const APP_LOGO = require("./assets/app-logo.png");
+const LAUNCH_BACKGROUND = "#004aad";
+const PAID_OFF_BALANCE = 0.005;
 
 type ScreenName =
   | "home"
@@ -85,14 +89,151 @@ function sortPaychecks(paychecks: PaycheckPlan[]): PaycheckPlan[] {
   return [...paychecks].sort((a, b) => a.paycheckDate.localeCompare(b.paycheckDate));
 }
 
+function roundCurrency(value: number): number {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function monthDiff(start: Date, monthKey: string): number {
+  const [year, month] = monthKey.split("-").map(Number);
+  return (year - start.getFullYear()) * 12 + (month - 1 - start.getMonth());
+}
+
+function paycheckCardPayments(
+  paycheck: PaycheckPlan,
+  creditCards: CreditCard[]
+): NonNullable<PaycheckPlan["cardPayments"]> {
+  if (paycheck.cardPayments?.length) {
+    return creditCards.map((card) => {
+      const existing = paycheck.cardPayments?.find(
+        (payment) => payment.cardId === card.id
+      );
+
+      return {
+        cardId: card.id,
+        plannedAmount: existing?.plannedAmount ?? 0,
+        actualAmount: existing?.actualAmount,
+      };
+    });
+  }
+
+  return creditCards.map((card, index) => ({
+    cardId: card.id,
+    plannedAmount: index === 0 ? paycheck.plannedCardPayment : 0,
+    actualAmount: index === 0 ? paycheck.actualCardPayment : undefined,
+  }));
+}
+
+function removePaidOffCardsFromFuturePlans(
+  paychecks: PaycheckPlan[],
+  creditCards: CreditCard[]
+): PaycheckPlan[] {
+  const cardStates = creditCards.reduce<
+    Record<
+      string,
+      {
+        balance: number;
+        currentMonthIndex: number;
+        monthlyRate: number;
+        startMonth: Date;
+      }
+    >
+  >(
+    (acc, card) => {
+      const createdAt = new Date(card.createdAt);
+      const startDate = Number.isNaN(createdAt.getTime()) ? new Date() : createdAt;
+
+      acc[card.id] = {
+        balance: roundCurrency(Math.max(card.balance, 0)),
+        currentMonthIndex: -1,
+        monthlyRate: Math.max(card.apr, 0) / 100 / 12,
+        startMonth: startOfMonth(startDate),
+      };
+      return acc;
+    },
+    {}
+  );
+
+  return sortPaychecks(paychecks).map((paycheck) => {
+    const paycheckDate = parseISODate(paycheck.paycheckDate);
+    const cardPayments = paycheckCardPayments(paycheck, creditCards);
+
+    if (!paycheckDate) {
+      return paycheck;
+    }
+
+    cardPayments.forEach((payment) => {
+      const state = cardStates[payment.cardId];
+
+      if (!state) {
+        return;
+      }
+
+      const targetMonthIndex = Math.max(
+        monthDiff(state.startMonth, getMonthKey(paycheckDate)),
+        0
+      );
+
+      while (state.currentMonthIndex < targetMonthIndex) {
+        state.currentMonthIndex += 1;
+        state.balance = roundCurrency(
+          state.balance + state.balance * state.monthlyRate
+        );
+      }
+    });
+
+    if (paycheck.status === "paid" || paycheck.status === "partial") {
+      cardPayments.forEach((payment) => {
+        const state = cardStates[payment.cardId];
+
+        if (state) {
+          state.balance = roundCurrency(
+            Math.max(state.balance - (payment.actualAmount ?? 0), 0)
+          );
+        }
+      });
+      return paycheck;
+    }
+
+    if (paycheck.status !== "planned") {
+      return paycheck;
+    }
+
+    const nextCardPayments = cardPayments.map((payment) => {
+      const state = cardStates[payment.cardId];
+      const remainingBalance = state?.balance ?? 0;
+      const plannedAmount =
+        remainingBalance <= PAID_OFF_BALANCE
+          ? 0
+          : Math.max(payment.plannedAmount, 0);
+
+      if (state) {
+        state.balance = roundCurrency(
+          Math.max(remainingBalance - plannedAmount, 0)
+        );
+      }
+
+      return {
+        cardId: payment.cardId,
+        plannedAmount,
+      };
+    });
+    const plannedCardPayment = nextCardPayments.reduce(
+      (total, payment) => total + payment.plannedAmount,
+      0
+    );
+
+    return {
+      ...paycheck,
+      plannedCardPayment,
+      cardPayments: nextCardPayments,
+    };
+  });
+}
+
 function sortDebitExpenses(expenses: DebitExpense[]): DebitExpense[] {
   return [...expenses].sort(
     (a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt)
   );
-}
-
-function bankAccountBalanceValue(account: BankAccountBalance): number {
-  return account.available ?? account.current ?? 0;
 }
 
 function hasAnyAppData(data: StoredAppData): boolean {
@@ -135,34 +276,50 @@ function TabButton({
   );
 }
 
-function screenTitle(screen: ScreenName): string {
+type AppHeaderContent = {
+  eyebrow: string;
+  title: string;
+};
+
+function appHeaderContent({
+  hasPayoffDashboard,
+  screen,
+}: {
+  hasPayoffDashboard: boolean;
+  screen: ScreenName;
+}): AppHeaderContent {
   switch (screen) {
     case "paychecks":
-      return "Paychecks";
+      return { eyebrow: "Future paychecks", title: "Payment plans" };
     case "cards":
     case "cardSetup":
-      return "Cards";
+      return { eyebrow: "Credit Cards", title: "Card balances" };
     case "debit":
-      return "Debit";
+      return { eyebrow: "Debit cards", title: "Spending tracker" };
     case "forecast":
-      return "Forecast";
+      return hasPayoffDashboard
+        ? { eyebrow: "Forecast", title: "Payoff estimate" }
+        : { eyebrow: "Credit Disk", title: "Card balances" };
     default:
-      return "Debt Cal";
+      return hasPayoffDashboard
+        ? {
+            eyebrow: "Credit Disk",
+            title: "Payoff dashboard",
+          }
+        : { eyebrow: "Credit Disk", title: "Card balances" };
   }
 }
 
 function accountInitial(session: CloudSession | null): string {
   const email = session?.user.email;
 
-  return email ? email.trim().charAt(0).toUpperCase() : "A";
-}
-
-function accountLabel(session: CloudSession | null): string {
-  return session?.user.email ?? "Sign in";
+  return email ? email.trim().charAt(0).toUpperCase() : "?";
 }
 
 export default function App() {
   const [loading, setLoading] = useState(true);
+  const [splashVisible, setSplashVisible] = useState(true);
+  const [splashOpacity] = useState(() => new Animated.Value(1));
   const [cards, setCards] = useState<CreditCard[]>([]);
   const [debitCards, setDebitCards] = useState<DebitCard[]>([]);
   const [debitExpenses, setDebitExpenses] = useState<DebitExpense[]>([]);
@@ -170,15 +327,13 @@ export default function App() {
   const [screen, setScreen] = useState<ScreenName>("home");
   const [activeCardId, setActiveCardId] = useState<string | null>(null);
   const [activePaycheckId, setActivePaycheckId] = useState<string | null>(null);
-  const [bankSyncLoading, setBankSyncLoading] = useState(false);
-  const [bankSyncError, setBankSyncError] = useState<string | null>(null);
-  const [lastBankSyncedAt, setLastBankSyncedAt] = useState<string | null>(null);
   const [cloudSession, setCloudSession] = useState<CloudSession | null>(null);
   const [cloudSyncLoading, setCloudSyncLoading] = useState(false);
   const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
   const [lastCloudSyncedAt, setLastCloudSyncedAt] = useState<string | null>(null);
   const [initialCardSetupSkipped, setInitialCardSetupSkipped] = useState(false);
   const [accountModalVisible, setAccountModalVisible] = useState(false);
+  const [debitCardFormVisible, setDebitCardFormVisible] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -194,13 +349,6 @@ export default function App() {
         setDebitCards(data.debitCards);
         setDebitExpenses(sortDebitExpenses(data.debitExpenses));
         setPaychecks(sortPaychecks(data.paychecks));
-        setLastBankSyncedAt(
-          data.debitCards
-            .map((card) => card.lastSyncedAt)
-            .filter((value): value is string => Boolean(value))
-            .sort()
-            .at(-1) ?? null
-        );
         getValidCloudSession()
           .then(async (session) => {
             if (mounted && session) {
@@ -225,6 +373,22 @@ export default function App() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (loading) {
+      return;
+    }
+
+    const fadeTimer = setTimeout(() => {
+      Animated.timing(splashOpacity, {
+        duration: 450,
+        toValue: 0,
+        useNativeDriver: true,
+      }).start(() => setSplashVisible(false));
+    }, 650);
+
+    return () => clearTimeout(fadeTimer);
+  }, [loading, splashOpacity]);
 
   const adjustedCards = useMemo(() => {
     const paidByCard = getActualPaidByCard(paychecks);
@@ -291,13 +455,6 @@ export default function App() {
     setDebitCards(data.debitCards);
     setDebitExpenses(sortedDebitExpenses);
     setPaychecks(sortedPaychecks);
-    setLastBankSyncedAt(
-      data.debitCards
-        .map((card) => card.lastSyncedAt)
-        .filter((value): value is string => Boolean(value))
-        .sort()
-        .at(-1) ?? null
-    );
     await saveAppData({
       creditCards: data.creditCards,
       debitCards: data.debitCards,
@@ -339,53 +496,8 @@ export default function App() {
     await persistCloudData(currentAppData({ debitCards: sorted }));
   }
 
-  async function persistSyncedBankAccounts(accounts: BankAccountBalance[]) {
-    const now = new Date().toISOString();
-    const nextCards = [...debitCards];
-
-    accounts.forEach((account) => {
-      const existingIndex = nextCards.findIndex(
-        (card) => card.externalAccountId === account.accountId
-      );
-      const maskedName = account.mask
-        ? `${account.name} ${account.mask}`
-        : account.name;
-      const nextCard: DebitCard = {
-        id:
-          existingIndex >= 0
-            ? nextCards[existingIndex].id
-            : createId("bank-debit"),
-        createdAt: existingIndex >= 0 ? nextCards[existingIndex].createdAt : now,
-        updatedAt: now,
-        balance: bankAccountBalanceValue(account),
-        externalAccountId: account.accountId,
-        institutionName: account.institutionName,
-        lastSyncedAt: now,
-        mask: account.mask ?? undefined,
-        name: account.institutionName
-          ? `${account.institutionName} ${maskedName}`
-          : maskedName,
-        source: "bank",
-      };
-
-      if (existingIndex >= 0) {
-        nextCards[existingIndex] = nextCard;
-      } else {
-        nextCards.push(nextCard);
-      }
-    });
-
-    const sorted = [...nextCards].sort((a, b) =>
-      a.createdAt.localeCompare(b.createdAt)
-    );
-    setDebitCards(sorted);
-    await saveDebitCards(sorted);
-    setLastBankSyncedAt(now);
-    await persistCloudData(currentAppData({ debitCards: sorted }));
-  }
-
   async function persistPaychecks(nextPaychecks: PaycheckPlan[]) {
-    const sorted = sortPaychecks(nextPaychecks);
+    const sorted = removePaidOffCardsFromFuturePlans(nextPaychecks, cards);
     setPaychecks(sorted);
     await savePaychecks(sorted);
     await persistCloudData(currentAppData({ paychecks: sorted }));
@@ -442,6 +554,25 @@ export default function App() {
     await persistDebitCards([...debitCards, nextCard]);
   }
 
+  async function handleUpdateDebitCard(
+    cardToUpdate: DebitCard,
+    values: DebitCardFormValues
+  ) {
+    const now = new Date().toISOString();
+
+    await persistDebitCards(
+      debitCards.map((card) =>
+        card.id === cardToUpdate.id
+          ? {
+              ...card,
+              ...values,
+              updatedAt: now,
+            }
+          : card
+      )
+    );
+  }
+
   async function handleSaveDebitExpense(values: DebitExpenseFormValues) {
     const now = new Date().toISOString();
     const nextExpense: DebitExpense = {
@@ -460,6 +591,52 @@ export default function App() {
         : card
     );
     const nextExpenses = sortDebitExpenses([...debitExpenses, nextExpense]);
+
+    setDebitCards(nextCards);
+    setDebitExpenses(nextExpenses);
+    await Promise.all([
+      saveDebitCards(nextCards),
+      saveDebitExpenses(nextExpenses),
+    ]);
+    await persistCloudData(
+      currentAppData({ debitCards: nextCards, debitExpenses: nextExpenses })
+    );
+  }
+
+  async function handleUpdateDebitExpense(
+    expenseToUpdate: DebitExpense,
+    values: DebitExpenseFormValues
+  ) {
+    const now = new Date().toISOString();
+    const nextCards = debitCards.map((card) => {
+      if (
+        card.id !== expenseToUpdate.debitCardId &&
+        card.id !== values.debitCardId
+      ) {
+        return card;
+      }
+
+      const restoredAmount =
+        card.id === expenseToUpdate.debitCardId ? expenseToUpdate.amount : 0;
+      const nextExpenseAmount = card.id === values.debitCardId ? values.amount : 0;
+
+      return {
+        ...card,
+        balance: card.balance + restoredAmount - nextExpenseAmount,
+        updatedAt: now,
+      };
+    });
+    const nextExpenses = sortDebitExpenses(
+      debitExpenses.map((expense) =>
+        expense.id === expenseToUpdate.id
+          ? {
+              ...expense,
+              ...values,
+              updatedAt: now,
+            }
+          : expense
+      )
+    );
 
     setDebitCards(nextCards);
     setDebitExpenses(nextExpenses);
@@ -531,41 +708,6 @@ export default function App() {
     setScreen("paychecks");
   }
 
-  async function handleConnectSandboxBank() {
-    setBankSyncLoading(true);
-    setBankSyncError(null);
-
-    try {
-      const accounts = await connectSandboxBank(cloudSession?.accessToken);
-      await persistSyncedBankAccounts(accounts);
-    } catch (error) {
-      setBankSyncError(
-        error instanceof Error ? error.message : "Could not connect sandbox bank."
-      );
-    } finally {
-      setBankSyncLoading(false);
-    }
-  }
-
-  async function handleRefreshBankBalances() {
-    setBankSyncLoading(true);
-    setBankSyncError(null);
-
-    try {
-      const accounts = await syncBankBalances(
-        true,
-        cloudSession?.accessToken
-      );
-      await persistSyncedBankAccounts(accounts);
-    } catch (error) {
-      setBankSyncError(
-        error instanceof Error ? error.message : "Could not refresh bank balances."
-      );
-    } finally {
-      setBankSyncLoading(false);
-    }
-  }
-
   async function handleAccountSession(nextSession: CloudSession) {
     setCloudSession(nextSession);
     const snapshot = await loadCloudSnapshot(nextSession);
@@ -628,26 +770,6 @@ export default function App() {
     } catch (error) {
       setCloudSyncError(
         error instanceof Error ? error.message : "Could not sign out."
-      );
-    } finally {
-      setCloudSyncLoading(false);
-    }
-  }
-
-  async function handleUploadDeviceData() {
-    if (!cloudSession) {
-      return;
-    }
-
-    setCloudSyncLoading(true);
-    setCloudSyncError(null);
-
-    try {
-      const snapshot = await saveCloudSnapshot(cloudSession, currentAppData());
-      setLastCloudSyncedAt(snapshot.updatedAt);
-    } catch (error) {
-      setCloudSyncError(
-        error instanceof Error ? error.message : "Could not upload device data."
       );
     } finally {
       setCloudSyncLoading(false);
@@ -749,21 +871,33 @@ export default function App() {
     setScreen("cardSetup");
   }
 
-  if (loading) {
+  function renderAppShell(children: React.ReactNode) {
     return (
       <SafeAreaView style={styles.app}>
-        <View style={styles.loading}>
-          <ActivityIndicator color={colors.green} />
-          <Text style={styles.loadingText}>Loading planner</Text>
-        </View>
+        {children}
+        {splashVisible ? (
+          <Animated.View
+            pointerEvents="none"
+            style={[styles.launchSplash, { opacity: splashOpacity }]}
+          >
+            <Image
+              accessibilityIgnoresInvertColors
+              source={APP_LOGO}
+              style={styles.launchLogo}
+            />
+          </Animated.View>
+        ) : null}
         <StatusBar style="dark" />
       </SafeAreaView>
     );
   }
 
+  if (loading) {
+    return renderAppShell(null);
+  }
+
   if ((cards.length === 0 && !initialCardSetupSkipped) || screen === "cardSetup") {
-    return (
-      <SafeAreaView style={styles.app}>
+    return renderAppShell(
         <CreditCardSetupScreen
           existingCardCount={cards.length}
           initialCard={activeCard}
@@ -778,31 +912,26 @@ export default function App() {
           onSave={handleSaveCard}
           onSkip={handleSkipInitialCardSetup}
         />
-        <StatusBar style="dark" />
-      </SafeAreaView>
     );
   }
 
   if (screen === "paycheckForm") {
-    return (
-      <SafeAreaView style={styles.app}>
+    return renderAppShell(
         <AddEditPaycheckScreen
           cards={cards}
           initialPaycheck={activePaycheck}
+          paychecks={paychecks}
           onCancel={() => {
             setActivePaycheckId(null);
             setScreen("paychecks");
           }}
           onSave={handleSavePaycheck}
         />
-        <StatusBar style="dark" />
-      </SafeAreaView>
     );
   }
 
   if (screen === "checkIn" && activePaycheck) {
-    return (
-      <SafeAreaView style={styles.app}>
+    return renderAppShell(
         <PaymentCheckInScreen
           cards={cards}
           onCancel={() => {
@@ -812,8 +941,6 @@ export default function App() {
           onSave={handleSaveCheckIn}
           paycheck={activePaycheck}
         />
-        <StatusBar style="dark" />
-      </SafeAreaView>
     );
   }
 
@@ -835,6 +962,16 @@ export default function App() {
         new Date(portfolioCard.createdAt)
       )
     : null;
+  const hasPayoffDashboard = Boolean(
+    portfolioCard && safePlannedResult && safeActualResult
+  );
+  const headerContent = appHeaderContent({
+    hasPayoffDashboard,
+    screen,
+  });
+  const showCreditAddAction =
+    screen === "cards" || (!hasPayoffDashboard && screen === "home");
+  const showDebitAddAction = screen === "debit";
 
   const mainScreen =
     screen === "forecast" && portfolioCard && safePlannedResult && safeActualResult ? (
@@ -868,24 +1005,22 @@ export default function App() {
       />
     ) : screen === "debit" ? (
       <DebitCardsScreen
-        bankSyncConfigured={isBankSyncConfigured()}
-        bankSyncError={bankSyncError}
-        bankSyncLoading={bankSyncLoading}
+        addDebitCardFormVisible={debitCardFormVisible}
         debitCards={debitCards}
         expenses={debitExpenses}
-        lastBankSyncedAt={lastBankSyncedAt}
         onAddDebitCard={handleSaveDebitCard}
         onAddExpense={handleSaveDebitExpense}
-        onConnectSandboxBank={handleConnectSandboxBank}
+        onCloseAddDebitCard={() => setDebitCardFormVisible(false)}
         onDeleteDebitCard={handleDeleteDebitCard}
         onDeleteExpense={handleDeleteDebitExpense}
-        onRefreshBankBalances={handleRefreshBankBalances}
+        onOpenAddDebitCard={() => setDebitCardFormVisible(true)}
+        onUpdateDebitCard={handleUpdateDebitCard}
+        onUpdateExpense={handleUpdateDebitExpense}
       />
     ) : portfolioCard && safePlannedResult && safeActualResult ? (
       <HomeScreen
         actualResult={safeActualResult}
         cards={adjustedCards}
-        onOpenCards={() => setScreen("cards")}
         paychecks={paychecks}
         plannedResult={safePlannedResult}
         startingBalance={startingPortfolioCard?.balance ?? portfolioCard.balance}
@@ -900,32 +1035,70 @@ export default function App() {
       />
     );
 
-  return (
-    <SafeAreaView style={styles.app}>
+  return renderAppShell(
+    <>
       <View style={styles.appHeader}>
-        <Text style={styles.appHeaderTitle}>{screenTitle(screen)}</Text>
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => setAccountModalVisible(true)}
-          style={({ pressed }) => [
-            styles.accountButton,
-            pressed ? styles.accountButtonPressed : null,
-          ]}
-        >
-          <View style={styles.accountAvatar}>
-            <Text style={styles.accountAvatarText}>
-              {accountInitial(cloudSession)}
-            </Text>
-          </View>
+        <View style={styles.appHeaderText}>
+          <Text style={styles.appHeaderEyebrow}>{headerContent.eyebrow}</Text>
           <Text
             adjustsFontSizeToFit
-            minimumFontScale={0.72}
+            minimumFontScale={0.78}
             numberOfLines={1}
-            style={styles.accountLabel}
+            style={styles.appHeaderTitle}
           >
-            {accountLabel(cloudSession)}
+            {headerContent.title}
           </Text>
-        </Pressable>
+        </View>
+        {showCreditAddAction || showDebitAddAction ? (
+          <Pressable
+            accessibilityLabel={
+              showDebitAddAction ? "Add debit card" : "Add credit card"
+            }
+            accessibilityRole="button"
+            onPress={() => {
+              if (showDebitAddAction) {
+                setDebitCardFormVisible(true);
+                return;
+              }
+
+              openCardForm();
+            }}
+            style={({ pressed }) => [
+              styles.headerAddButton,
+              pressed ? styles.accountButtonPressed : null,
+            ]}
+          >
+            <Text style={styles.headerAddText}>+</Text>
+          </Pressable>
+        ) : (
+          <Pressable
+            accessibilityLabel={cloudSession ? "Account" : "Sign in"}
+            accessibilityRole="button"
+            onPress={() => setAccountModalVisible(true)}
+            style={({ pressed }) => [
+              styles.accountButton,
+              cloudSession ? styles.accountButtonSignedIn : null,
+              pressed ? styles.accountButtonPressed : null,
+            ]}
+          >
+            {cloudSession ? (
+              <View style={styles.accountAvatar}>
+                <Text style={styles.accountAvatarText}>
+                  {accountInitial(cloudSession)}
+                </Text>
+              </View>
+            ) : (
+              <Text
+                adjustsFontSizeToFit
+                minimumFontScale={0.72}
+                numberOfLines={1}
+                style={styles.accountLabel}
+              >
+                Sign in
+              </Text>
+            )}
+          </Pressable>
+        )}
       </View>
       <View style={styles.main}>{mainScreen}</View>
       <View style={styles.tabBarWrap}>
@@ -942,7 +1115,7 @@ export default function App() {
           />
           <TabButton
             active={screen === "cards"}
-            label="Cards"
+            label="Credit"
             onPress={() => setScreen("cards")}
           />
           <TabButton
@@ -966,12 +1139,9 @@ export default function App() {
         <View style={styles.accountModalBackdrop}>
           <View style={styles.accountModalCard}>
             <View style={styles.accountModalHeader}>
-              <View>
-                <Text style={styles.accountModalEyebrow}>Account</Text>
-                <Text style={styles.accountModalTitle}>
-                  {cloudSession ? "Account details" : "Sign in"}
-                </Text>
-              </View>
+              <Text style={styles.accountModalTitle}>
+                {cloudSession ? "Account" : "Sign in"}
+              </Text>
               <Pressable
                 accessibilityRole="button"
                 onPress={() => setAccountModalVisible(false)}
@@ -980,25 +1150,24 @@ export default function App() {
                   pressed ? styles.accountButtonPressed : null,
                 ]}
               >
-                <Text style={styles.modalCloseText}>Close</Text>
+                <Text style={styles.modalCloseText}>Done</Text>
               </Pressable>
             </View>
             <AccountScreen
               error={cloudSyncError}
               lastSyncedAt={lastCloudSyncedAt}
               loading={cloudSyncLoading}
+              onClearError={() => setCloudSyncError(null)}
               onDownloadCloud={handleDownloadCloudData}
               onSignIn={handleSignIn}
               onSignOut={handleSignOut}
               onSignUp={handleSignUp}
-              onUploadDevice={handleUploadDeviceData}
               session={cloudSession}
             />
           </View>
         </View>
       </Modal>
-      <StatusBar style="dark" />
-    </SafeAreaView>
+    </>
   );
 }
 
@@ -1007,6 +1176,22 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
     flex: 1,
   },
+  launchSplash: {
+    alignItems: "center",
+    backgroundColor: LAUNCH_BACKGROUND,
+    bottom: 0,
+    justifyContent: "center",
+    left: 0,
+    position: "absolute",
+    right: 0,
+    top: 0,
+    zIndex: 100,
+  },
+  launchLogo: {
+    borderRadius: 32,
+    height: 148,
+    width: 148,
+  },
   appHeader: {
     alignItems: "center",
     backgroundColor: colors.background,
@@ -1014,13 +1199,23 @@ const styles = StyleSheet.create({
     gap: spacing.md,
     justifyContent: "space-between",
     paddingHorizontal: spacing.lg,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.xs,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.md,
+  },
+  appHeaderText: {
+    flex: 1,
+    gap: spacing.xs,
+    minWidth: 0,
+  },
+  appHeaderEyebrow: {
+    color: colors.green,
+    fontSize: 13,
+    fontWeight: "800",
+    textTransform: "uppercase",
   },
   appHeaderTitle: {
     color: colors.text,
-    flex: 1,
-    fontSize: 18,
+    fontSize: 34,
     fontWeight: "900",
   },
   accountButton: {
@@ -1035,6 +1230,12 @@ const styles = StyleSheet.create({
     minHeight: 40,
     paddingHorizontal: spacing.sm,
     paddingVertical: spacing.xs,
+  },
+  accountButtonSignedIn: {
+    justifyContent: "center",
+    maxWidth: 44,
+    paddingHorizontal: spacing.xs,
+    width: 44,
   },
   accountButtonPressed: {
     opacity: 0.72,
@@ -1058,19 +1259,22 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "800",
   },
+  headerAddButton: {
+    alignItems: "center",
+    backgroundColor: colors.green,
+    borderRadius: 999,
+    height: 36,
+    justifyContent: "center",
+    width: 36,
+  },
+  headerAddText: {
+    color: "#FFFFFF",
+    fontSize: 24,
+    fontWeight: "800",
+    lineHeight: 26,
+  },
   main: {
     flex: 1,
-  },
-  loading: {
-    alignItems: "center",
-    flex: 1,
-    gap: spacing.md,
-    justifyContent: "center",
-  },
-  loadingText: {
-    color: colors.textMuted,
-    fontSize: 15,
-    fontWeight: "700",
   },
   tabBarWrap: {
     backgroundColor: colors.background,
@@ -1112,7 +1316,7 @@ const styles = StyleSheet.create({
   },
   accountModalBackdrop: {
     alignItems: "center",
-    backgroundColor: "rgba(0,0,0,0.58)",
+    backgroundColor: "rgba(0,0,0,0.32)",
     flex: 1,
     justifyContent: "center",
     padding: spacing.lg,
@@ -1120,42 +1324,34 @@ const styles = StyleSheet.create({
   accountModalCard: {
     backgroundColor: colors.background,
     borderColor: colors.border,
-    borderRadius: 22,
+    borderRadius: 28,
     borderWidth: StyleSheet.hairlineWidth,
-    height: "78%",
     maxWidth: 520,
-    maxHeight: "90%",
-    padding: spacing.lg,
+    maxHeight: "82%",
+    padding: spacing.xl,
     width: "100%",
   },
   accountModalHeader: {
-    alignItems: "flex-start",
+    alignItems: "center",
     flexDirection: "row",
     gap: spacing.md,
     justifyContent: "space-between",
-    marginBottom: spacing.lg,
-  },
-  accountModalEyebrow: {
-    color: colors.green,
-    fontSize: 12,
-    fontWeight: "900",
-    marginBottom: spacing.xs,
-    textTransform: "uppercase",
+    marginBottom: spacing.xl,
   },
   accountModalTitle: {
     color: colors.text,
-    fontSize: 24,
-    fontWeight: "900",
+    flex: 1,
+    fontSize: 28,
+    fontWeight: "700",
   },
   modalCloseButton: {
-    backgroundColor: colors.surfaceMuted,
     borderRadius: 999,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
   },
   modalCloseText: {
-    color: colors.text,
-    fontSize: 13,
-    fontWeight: "900",
+    color: colors.green,
+    fontSize: 17,
+    fontWeight: "600",
   },
 });

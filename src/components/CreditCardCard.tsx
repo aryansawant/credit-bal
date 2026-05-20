@@ -31,10 +31,9 @@ export function CreditCardCard({
     <Pressable
       accessibilityRole="button"
       onPress={onPress}
-      style={({ pressed }) => [
+      style={[
         styles.walletCard,
         selected && styles.selectedCard,
-        pressed && styles.pressed,
         {
           backgroundColor: palette.backgroundColor,
           borderColor: "rgba(255,255,255,0.16)",
@@ -101,7 +100,7 @@ export function CreditCardCard({
 const styles = StyleSheet.create({
   walletCard: {
     aspectRatio: 1.72,
-    borderRadius: 0,
+    borderRadius: radii.sm,
     borderWidth: 2,
     justifyContent: "space-between",
     overflow: "hidden",
@@ -111,9 +110,6 @@ const styles = StyleSheet.create({
   selectedCard: {
     aspectRatio: 1.56,
     transform: [{ translateY: -4 }],
-  },
-  pressed: {
-    opacity: 0.92,
   },
   orb: {
     borderRadius: 140,

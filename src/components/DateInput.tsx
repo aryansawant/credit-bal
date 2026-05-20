@@ -82,7 +82,8 @@ export function DateInput({
                   setDraftDate(date);
                 }
               }}
-              themeVariant="dark"
+              textColor={colors.text}
+              themeVariant="light"
               value={draftDate}
             />
 
